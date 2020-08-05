@@ -6,6 +6,8 @@ from babyai.rl.format import default_preprocess_obss
 from babyai.rl.utils import DictList, ParallelEnv
 from babyai.rl.utils.supervised_losses import ExtraInfoCollector
 
+from babyai.rl.algos.cpv_reward import CPV
+
 
 class BaseAlgo(ABC):
     """The base class for RL algorithms."""
@@ -107,6 +109,9 @@ class BaseAlgo(ABC):
         self.log_reshaped_return = [0] * self.num_procs
         self.log_num_frames = [0] * self.num_procs
 
+        # Store reward model
+        self.reward_model = CPV(primed_model='babyai/rl/algos/models/cpv_model.pth')
+
     def collect_experiences(self):
         """Collects rollouts and computes advantages.
 
@@ -141,10 +146,12 @@ class BaseAlgo(ABC):
 
             action = dist.sample()
 
-            obs, reward, done, env_info = self.env.step(action.cpu().numpy())
+            obs, old_reward, done, env_info = self.env.step(action.cpu().numpy())
+            reward = [self.reward_model.calculate_reward(env_info[i]['mission'], env_info[i]['past'], env_info[i]['target']) for i in range(len(old_reward))]
+
             if self.aux_info:
                 env_info = self.aux_info_collector.process(env_info)
-                # env_info = self.process_aux_info(env_info)
+                env_info = self.process_aux_info(env_info)
 
             # Update experiences values
 
@@ -171,7 +178,6 @@ class BaseAlgo(ABC):
                 self.aux_info_collector.fill_dictionaries(i, env_info, extra_predictions)
 
             # Update log values
-
             self.log_episode_return += torch.tensor(reward, device=self.device, dtype=torch.float)
             self.log_episode_reshaped_return += self.rewards[i]
             self.log_episode_num_frames += torch.ones(self.num_procs, device=self.device)
