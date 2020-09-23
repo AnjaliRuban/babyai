@@ -13,7 +13,7 @@ class CPV(nn.Module):
         self.seg = 1
 
         self.device = torch.device('cuda')
-        primed_model = torch.load(primed_model)
+        primed_model = torch.load(primed_model, map_location=self.device)
         self.args = primed_model['args']
         self.vocab = primed_model['vocab']
 
@@ -72,7 +72,9 @@ class CPV(nn.Module):
         comb_contexts = high - contexts # -> H
         sim_m = torch.matmul(comb_contexts, target) # -> 1
 
-        return sim_m
+        done = torch.dot(high, contexts)
+
+        return sim_m, done
 
     def remove_spaces(self, s):
         cs = ' '.join(s.split())
@@ -100,5 +102,5 @@ class CPV(nn.Module):
         target = torch.tensor(target, dtype=torch.float).reshape(self.img_shape).to(self.device) # -> 147
 
         self.eval()
-        reward = self.forward(high, contexts, target).detach().item()
-        return reward
+        reward, done = self.forward(high, contexts, target).detach().item()
+        return reward, done

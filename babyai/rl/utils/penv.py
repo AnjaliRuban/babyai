@@ -1,5 +1,6 @@
 from multiprocessing import Process, Pipe
 import gym
+import pdb
 
 def worker(conn, env):
     while True:
@@ -46,6 +47,7 @@ class ParallelEnv(gym.Env):
         for local, action in zip(self.locals, actions[1:]):
             local.send(("step", action))
         obs, reward, done, info = self.envs[0].step(actions[0])
+        
         if done:
             obs = self.envs[0].reset()
         results = zip(*[(obs, reward, done, info)] + [local.recv() for local in self.locals])

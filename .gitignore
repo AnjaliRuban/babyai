@@ -1,3 +1,10 @@
+# Env (we should probably standardize this at some point)
+babyai.yml
+
+# Logs 
+logs/
+output_logs/
+
 model/glove50.txt
 trained_models
 

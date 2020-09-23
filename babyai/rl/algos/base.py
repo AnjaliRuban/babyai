@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 import torch
 import numpy
+import pdb
 
 from babyai.rl.format import default_preprocess_obss
 from babyai.rl.utils import DictList, ParallelEnv
@@ -13,7 +14,7 @@ class BaseAlgo(ABC):
     """The base class for RL algorithms."""
 
     def __init__(self, envs, acmodel, num_frames_per_proc, discount, lr, gae_lambda, entropy_coef,
-                 value_loss_coef, max_grad_norm, recurrence, preprocess_obss, reshape_reward, aux_info):
+                 value_loss_coef, max_grad_norm, recurrence, preprocess_obss, reshape_reward, aux_info, reward_fn):
         """
         Initializes a `BaseAlgo` instance.
 
@@ -26,7 +27,7 @@ class BaseAlgo(ABC):
         num_frames_per_proc : int
             the number of frames collected by every process for an update
         discount : float
-            the discount for future rewards
+            the discount for future s
         lr : float
             the learning rate for optimizers
         gae_lambda : float
@@ -49,7 +50,8 @@ class BaseAlgo(ABC):
         aux_info : list
             a list of strings corresponding to the name of the extra information
             retrieved from the environment for supervised auxiliary losses
-
+        reward_fn: str
+            [babyai, cpv, both] -- The reward function to use to train the RL agent. 
         """
         # Store parameters
 
@@ -67,10 +69,12 @@ class BaseAlgo(ABC):
         self.preprocess_obss = preprocess_obss or default_preprocess_obss
         self.reshape_reward = reshape_reward
         self.aux_info = aux_info
+        self.reward_fn = reward_fn
 
         # Store helpers values
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         self.num_procs = len(envs)
         self.num_frames = self.num_frames_per_proc * self.num_procs
 
@@ -110,7 +114,11 @@ class BaseAlgo(ABC):
         self.log_num_frames = [0] * self.num_procs
 
         # Store reward model
-        self.reward_model = CPV(primed_model='babyai/rl/algos/models/cpv_model.pth')
+        if self.reward_fn == 'cpv' or self.reward_fn == 'both':
+            self.reward_model = CPV(primed_model='babyai/rl/algos/models/cpv_model.pth')
+    
+        self.all_rewards = [] # For calculating the std and mean of rewards
+
 
     def collect_experiences(self):
         """Collects rollouts and computes advantages.
@@ -122,7 +130,7 @@ class BaseAlgo(ABC):
         Returns
         -------
         exps : DictList
-            Contains actions, rewards, advantages etc as attributes.
+            Cscripts/train_rl.py --env BabyAI-GoToLocal-v0ontains actions, rewards, advantages etc as attributes.
             Each attribute, e.g. `exps.reward` has a shape
             (self.num_frames_per_proc * num_envs, ...). k-th block
             of consecutive `self.num_frames_per_proc` frames contains
@@ -146,12 +154,30 @@ class BaseAlgo(ABC):
 
             action = dist.sample()
 
+            # Take a step in env and process reward if not using default reward function. 
             obs, old_reward, done, env_info = self.env.step(action.cpu().numpy())
-            reward = [self.reward_model.calculate_reward(env_info[i]['mission'], env_info[i]['past'], env_info[i]['target']) for i in range(len(old_reward))]
 
-            if self.aux_info:
-                env_info = self.aux_info_collector.process(env_info)
-                env_info = self.process_aux_info(env_info)
+            if self.reward_fn == 'cpv' or self.reward_fn == 'both': 
+
+                unnormalized_reward = [self.reward_model.calculate_reward(env_info[i]['mission'], env_info[i]['past'], env_info[i]['target']) for i in range(len(old_reward))]
+
+                if self.aux_info:
+                    env_info = self.aux_info_collector.process(env_info)
+                    env_info = self.process_aux_info(env_info)
+
+                std = numpy.std(self.all_rewards) if self.all_rewards != [] else numpy.std(unnormalized_reward)
+                mean = numpy.mean(self.all_rewards) if self.all_rewards != [] else numpy.mean(unnormalized_reward)
+                reward = numpy.clip([(r - mean) /  std for r in unnormalized_reward], 0, 1)
+                self.all_rewards.extend(unnormalized_reward)
+                if len(self.all_rewards) > 1000:
+                    self.all_rewards[-1000:]
+
+            elif self.reward_fn == 'babyai': 
+                reward = old_reward
+
+                if self.aux_info: 
+                    env_info = self.aux_info_collector.process(env_info)
+                    #env_info = self.process_aux_info(env_info)
 
             # Update experiences values
 
@@ -204,7 +230,15 @@ class BaseAlgo(ABC):
             next_value = self.values[i+1] if i < self.num_frames_per_proc - 1 else next_value
             next_advantage = self.advantages[i+1] if i < self.num_frames_per_proc - 1 else 0
 
+            # print("Reward")
+            # print(self.rewards[i])
+            # # print("Discount")
+            # # print(self.discount[i])
+            # print("Values")
+            # print(self.values[i])
+
             delta = self.rewards[i] + self.discount * next_value * next_mask - self.values[i]
+
             self.advantages[i] = delta + self.discount * self.gae_lambda * next_advantage * next_mask
 
         # Flatten the data correctly, making sure that

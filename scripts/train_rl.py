@@ -44,6 +44,8 @@ parser.add_argument("--ppo-epochs", type=int, default=4,
                     help="number of epochs for PPO (default: 4)")
 parser.add_argument("--save-interval", type=int, default=50,
                     help="number of updates between two saves (default: 50, 0 means no saving)")
+parser.add_argument("--reward_fn", type=str, default="babyai", 
+                    help="Reward function to use to train RL agent.", choices=['babyai', 'cpv', 'both'])
 args = parser.parse_args()
 
 utils.seed(args.seed)
@@ -68,8 +70,9 @@ model_name_parts = {
     'seed': args.seed,
     'info': '',
     'coef': '',
-    'suffix': suffix}
-default_model_name = "{env}_{algo}_{arch}_{instr}_{mem}_seed{seed}{info}{coef}_{suffix}".format(**model_name_parts)
+    'suffix': suffix,
+    'reward_fn': args.reward_fn}
+default_model_name = "{env}_{algo}_{arch}_{instr}_{mem}_seed{seed}{info}{coef}_{suffix}_{reward_fn}".format(**model_name_parts)
 if args.pretrained_model:
     default_model_name = args.pretrained_model + '_pretrained_' + default_model_name
 args.model = args.model.format(**model_name_parts) if args.model else default_model_name
@@ -107,7 +110,7 @@ if args.algo == "ppo":
                              args.gae_lambda,
                              args.entropy_coef, args.value_loss_coef, args.max_grad_norm, args.recurrence,
                              args.optim_eps, args.clip_eps, args.ppo_epochs, args.batch_size, obss_preprocessor,
-                             reshape_reward)
+                             reshape_reward, None, args.reward_fn)
 else:
     raise ValueError("Incorrect algorithm name: {}".format(args.algo))
 

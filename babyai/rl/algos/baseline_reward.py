@@ -63,7 +63,9 @@ class Baseline(nn.Module):
         ### COMB ###
         sim_m = torch.matmul(contexts, target) # -> 1
 
-        return sim_m
+        done = torch.dot(high, contexts)
+
+        return sim_m, done
 
     def remove_spaces(self, s):
         cs = ' '.join(s.split())
@@ -88,6 +90,8 @@ class Baseline(nn.Module):
         target = torch.tensor(target, dtype=torch.float).reshape(self.img_shape).to(self.device) # -> 147
 
         self.eval()
-        reward = self.forward(high, contexts, target).to(torch.device('cpu')).detach().numpy()
+        reward, done  = self.forward(high, contexts, target)
+        reward = reward.to(torch.device('cpu')).detach().numpy()
+        done = done.to(torch.device('cpu')).detach().numpy()
 
         return reward
