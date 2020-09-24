@@ -78,7 +78,6 @@ class BaseAlgo(ABC):
         self.num_procs = len(envs)
         self.num_frames = self.num_frames_per_proc * self.num_procs
 
-
         assert self.num_frames_per_proc % self.recurrence == 0
 
         # Initialize experience values
@@ -117,8 +116,18 @@ class BaseAlgo(ABC):
         if self.reward_fn == 'cpv' or self.reward_fn == 'both':
             self.reward_model = CPV(primed_model='babyai/rl/algos/models/cpv_model.pth')
     
+            # Keep track of observations and mission so that we can compute cpv-based reward. 
+            self.reset_cpv_buffer()
+
         self.all_rewards = [] # For calculating the std and mean of rewards
 
+    def reset_cpv_buffer(self): 
+        
+        self.cpv_buffer = {
+                'obs': [[]] * self.num_procs, 
+                'mission': [None] * self.num_procs,
+                'prev_reward': [0.0] * self.num_procs
+        }
 
     def collect_experiences(self):
         """Collects rollouts and computes advantages.
@@ -141,6 +150,11 @@ class BaseAlgo(ABC):
             reward, policy loss, value loss, etc.
 
         """
+
+        # Reset cpv buffer if needed. 
+        if self.reward_fn == 'cpv' or self.reward_fn == 'both':
+            self.reset_cpv_buffer()
+
         for i in range(self.num_frames_per_proc):
             # Do one agent-environment interaction
 
@@ -159,7 +173,8 @@ class BaseAlgo(ABC):
 
             if self.reward_fn == 'cpv' or self.reward_fn == 'both': 
 
-                unnormalized_reward = [self.reward_model.calculate_reward(env_info[i]['mission'], env_info[i]['past'], env_info[i]['target']) for i in range(len(old_reward))]
+                # TODO can we avoid the loop and tensorize the whole operation? 
+                unnormalized_reward = [self.reward_model.calculate_reward(self.cpv_buffer, self.obs, idx) for idx in range(len(old_reward))]
 
                 if self.aux_info:
                     env_info = self.aux_info_collector.process(env_info)

@@ -4,6 +4,8 @@ import numpy as np
 from torch import nn
 from vocab import Vocab
 import matplotlib.pyplot as plt
+import pdb
+from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 
 class CPV(nn.Module):
     def __init__(self, primed_model='models/cpv_model.pth'):
@@ -19,62 +21,88 @@ class CPV(nn.Module):
 
         self.img_shape = 7 * 7 * 3
 
-        self.embed = self.embed = nn.Embedding(len(self.vocab), self.args.demb)
+        self.embed = nn.Embedding(len(self.vocab), self.args.demb)
         self.linear = nn.Linear(self.args.demb, self.img_shape)
         self.enc = nn.LSTM(self.img_shape, self.args.dhid, bidirectional=True, batch_first=True)
         self.to(self.device)
 
         self.load_state_dict(primed_model['model'], strict=False)
 
-    def encoder(self, batch, batch_size):
+    def encoder(self, batch, batch_size, h_0=None, c_0=None):
         '''
-        Runs the sequences through an LSTM
+        Encodes a stacked tensor.
         '''
 
-        h_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
-        c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> L * 2 x B x H
-        out, (h, c) = self.enc(batch, (h_0, c_0)) # -> L * 2 x B x H
+        if h_0 is None or c_0 is None:
+            h_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
+            c_0 = torch.zeros(2, batch_size, self.args.dhid).type(torch.float).to(self.device) # -> 2 x B x H
+        out, (h, c) = self.enc(batch, (h_0, c_0)) # -> 2 x B x H
 
-        # Sum the hiddens for the bidirectional LSTM
         hid_sum = torch.sum(h, dim=0) # -> B x H
 
-        return hid_sum
+        return hid_sum, h, c
 
-    def forward(self, high, contexts, target):
-        '''
-        Takes in language mission (string), past observations (list of imgs), and
-        the next action observation (img) and returns the dot product of each
-        enc(high) - enc(context) with each enc(target)
+    def forward(self, high, context, target, high_lens, context_lens, target_lens):
         '''
 
-        contexts_len = contexts.shape[0]
+        '''
 
-        ### HIGHS ###
-        high = self.embed(high) # -> 1 x M x D (D = embedding size)
-        high = self.linear(high) # -> 1 x M x 147
-        high = self.encoder(high, 1) # -> 1 x H
-        high = high.squeeze() # -> H
+        B = context.shape[0]
 
-        ### CONTEXTS ###
-        contexts = contexts.reshape(contexts_len, 1, self.img_shape)
-        contexts = self.encoder(contexts, contexts_len) # -> N x H
-        contexts = contexts.reshape(1, contexts_len, -1) # -> 1 x N x H
-        contexts = torch.sum(contexts, dim=1)  # -> 1 x H
-        contexts = contexts.squeeze() # -> H
+        ### High ###
+        high = self.embed(high) # -> B x M x D
+        high = self.linear(high) # -> B x M x 147
+        high = pack_padded_sequence(high, high_lens, batch_first=True, enforce_sorted=False)
+        high, _, _ = self.encoder(high, B) # -> B x H
 
-        ### TARGETS ###
-        target = target.reshape(1, 1, -1)
-        target = self.encoder(target, 1) # -> 1 x H
-        target = target.reshape(1, 1, -1) # -> 1 x H
-        target = target.squeeze() # -> H
+        ### Context ###
+        context = pack_padded_sequence(context, context_lens, batch_first=True, enforce_sorted=False)
+        context, h, c = self.encoder(context, B)
 
-        ### COMB ###
-        comb_contexts = high - contexts # -> H
-        sim_m = torch.matmul(comb_contexts, target) # -> 1
+        ### Target ###
+        packed_target = pack_padded_sequence(target, target_lens, batch_first=True, enforce_sorted=False)
+        target, _, _ = self.encoder(packed_target, B)
 
-        done = torch.dot(high, contexts)
+        ### Full Trajectory ###
+        trajectory, _, _ = self.encoder(packed_target, B, h, c)
 
-        return sim_m, done
+        ### Combinations ###
+        output = {}
+        output["H * C"] = torch.matmul(high, torch.transpose(context, 0, 1)) # -> B x B
+        output["<H, C>"] = torch.bmm(high.reshape(B, 1, -1), context.reshape(B, -1, 1)).squeeze() # -> B
+        output["<H, T>"] = torch.bmm(high.reshape(B, 1, -1), target.reshape(B, -1, 1)).squeeze() # -> B
+        output["<H, N>"] = torch.bmm(high.reshape(B, 1, -1), trajectory.reshape(B, -1, 1)).squeeze() # -> B
+        output["<H, C + T>"] = torch.bmm(high.reshape(B, 1, -1), (context + target).reshape(B, -1, 1)).squeeze() # -> B
+        output["norm(H)"] = torch.norm(high, dim=1) # -> B
+        output["norm(C)"] = torch.norm(context, dim=1) # -> B
+        output["norm(T)"] = torch.norm(target, dim=1) # -> B
+        output["norm(N)"] = torch.norm(trajectory, dim=1) # -> B
+        output["cos(H, N)"] = F.cosine_similarity(high, trajectory) # -> B
+
+        return output
+
+    def compute_similarity(self, high, context, high_lens, context_lens): 
+        """
+        Compute similarity between a high level instruction 
+        and a trajectory segment. 
+        """
+
+        B = context.shape[0]
+
+        ### High ###
+        high = self.embed(high) # -> B x M x D
+        high = self.linear(high) # -> B x M x 147
+        high = pack_padded_sequence(high, high_lens, batch_first=True, enforce_sorted=False)
+        high, _, _ = self.encoder(high, B) # -> B x H
+
+        ### Context ###
+        context = pack_padded_sequence(context, context_lens, batch_first=True, enforce_sorted=False)
+        context, h, c = self.encoder(context, B)
+
+        ### Combinations ###
+        sim = torch.matmul(high, torch.transpose(context, 0, 1)) # -> B x B
+
+        return sim
 
     def remove_spaces(self, s):
         cs = ' '.join(s.split())
@@ -85,22 +113,42 @@ class CPV(nn.Module):
         cs = cs.lower()
         return cs
 
+    def calculate_reward(self, cpv_buffer, new_obs, idx):
 
-    def calculate_reward(self, high, contexts, target):
+        # Unpack values from buffer. 
+        highs = cpv_buffer['mission']
+        prev_obs = cpv_buffer['obs']
+        prev_rewards = cpv_buffer['prev_reward']
 
-        high = revtok.tokenize(self.remove_spaces_and_lower(high)) # -> M
-        high = self.vocab.word2index([w.strip().lower() if w.strip().lower() in self.vocab.to_dict()['index2word'] else '<<pad>>' for w in high]) # -> M
-        if high == []:
-            high = [0]
-        high = torch.tensor(high, dtype=torch.long) # -> M
+        # If first time step, then tokenize mission using observation. 
+        if highs[idx] is None: 
+
+            high = revtok.tokenize(self.remove_spaces_and_lower(new_obs[idx]['mission'])) # -> M
+            high = self.vocab.word2index([w.strip().lower() if w.strip().lower() in self.vocab.to_dict()['index2word'] else '<<pad>>' for w in high]) # -> M
+
+            highs[idx] = high
+
+        # Put on device. 
+        high = torch.tensor(highs[idx], dtype=torch.long) # -> M
         high = high.reshape(1, -1).to(self.device) # -> 1 x M
 
+        high_len = high.bool().byte().sum().view(1,).to(self.device)
 
-        contexts = [torch.tensor(img, dtype=torch.float).reshape(self.img_shape) for img in contexts]
-        contexts = torch.stack(contexts).to(self.device) # -> N x 147
+        # Add new observation to buffer. 
+        prev_obs[idx].append(new_obs[idx]['image'].reshape(self.img_shape))
 
-        target = torch.tensor(target, dtype=torch.float).reshape(self.img_shape).to(self.device) # -> 147
+        # Full trajectory with new observation. 
+        traj = torch.tensor(prev_obs[idx], dtype=torch.float).view(1, len(prev_obs[idx]), -1).to(self.device)
+        traj_len = torch.tensor([len(prev_obs[idx])]).to(self.device)
 
+        # Compute CPV reward with new observation incorporated. 
         self.eval()
-        reward, done = self.forward(high, contexts, target).detach().item()
-        return reward, done
+        new_sim = self.compute_similarity(high, traj, high_len, traj_len).item()
+
+        # Potential-based reward is delta in similarity between previous and current trajectory. 
+        reward = new_sim - prev_rewards[idx]
+
+        # Store in cache for use next iteration. 
+        prev_rewards[idx] = reward
+
+        return reward

@@ -46,6 +46,7 @@ parser.add_argument("--save-interval", type=int, default=50,
                     help="number of updates between two saves (default: 50, 0 means no saving)")
 parser.add_argument("--reward_fn", type=str, default="babyai", 
                     help="Reward function to use to train RL agent.", choices=['babyai', 'cpv', 'both'])
+
 args = parser.parse_args()
 
 utils.seed(args.seed)

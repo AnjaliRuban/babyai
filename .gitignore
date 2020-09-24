@@ -120,3 +120,5 @@ storage/
 *.csv
 *.pt
 *.json
+*.swp
+*.swo
