@@ -174,14 +174,8 @@ class BaseAlgo(ABC):
 
             if self.reward_fn == 'cpv' or self.reward_fn == 'both': 
 
-                start = time.time()
-
                 # TODO can we avoid the loop and tensorize the whole operation? 
                 unnormalized_reward = self.reward_model.calculate_reward(self.cpv_buffer, self.obs)
-
-                end = time.time()
-
-                print(end - start)
 
                 if self.aux_info:
                     env_info = self.aux_info_collector.process(env_info)
