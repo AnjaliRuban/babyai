@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import torch
 import numpy
 import pdb
+import time 
 
 from babyai.rl.format import default_preprocess_obss
 from babyai.rl.utils import DictList, ParallelEnv
@@ -124,9 +125,9 @@ class BaseAlgo(ABC):
     def reset_cpv_buffer(self): 
         
         self.cpv_buffer = {
-                'obs': [[]] * self.num_procs, 
-                'mission': [None] * self.num_procs,
-                'prev_reward': [0.0] * self.num_procs
+                'obs': [],
+                'mission': [],
+                'prev_reward': numpy.zeros((self.num_procs,))
         }
 
     def collect_experiences(self):
@@ -173,8 +174,14 @@ class BaseAlgo(ABC):
 
             if self.reward_fn == 'cpv' or self.reward_fn == 'both': 
 
+                start = time.time()
+
                 # TODO can we avoid the loop and tensorize the whole operation? 
-                unnormalized_reward = [self.reward_model.calculate_reward(self.cpv_buffer, self.obs, idx) for idx in range(len(old_reward))]
+                unnormalized_reward = self.reward_model.calculate_reward(self.cpv_buffer, self.obs)
+
+                end = time.time()
+
+                print(end - start)
 
                 if self.aux_info:
                     env_info = self.aux_info_collector.process(env_info)

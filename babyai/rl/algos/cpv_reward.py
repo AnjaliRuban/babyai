@@ -100,8 +100,12 @@ class CPV(nn.Module):
         context, h, c = self.encoder(context, B)
 
         ### Combinations ###
-        sim = torch.matmul(high, torch.transpose(context, 0, 1)) # -> B x B
+        dot_prod = torch.diagonal(torch.matmul(high, torch.transpose(context, 0, 1))) # -> B
+        norms = torch.norm(high, dim=1)
 
+        # Similarity between high and current trajectory normalized by the high's norm. 
+        sim = dot_prod / norms
+        
         return sim
 
     def remove_spaces(self, s):
@@ -113,7 +117,7 @@ class CPV(nn.Module):
         cs = cs.lower()
         return cs
 
-    def calculate_reward(self, cpv_buffer, new_obs, idx):
+    def calculate_reward(self, cpv_buffer, new_obs):
 
         # Unpack values from buffer. 
         highs = cpv_buffer['mission']
@@ -121,34 +125,37 @@ class CPV(nn.Module):
         prev_rewards = cpv_buffer['prev_reward']
 
         # If first time step, then tokenize mission using observation. 
-        if highs[idx] is None: 
+        if len(highs) == 0: 
 
-            high = revtok.tokenize(self.remove_spaces_and_lower(new_obs[idx]['mission'])) # -> M
-            high = self.vocab.word2index([w.strip().lower() if w.strip().lower() in self.vocab.to_dict()['index2word'] else '<<pad>>' for w in high]) # -> M
+            for idx in range(len(new_obs)): 
+                high = revtok.tokenize(self.remove_spaces_and_lower(new_obs[idx]['mission'])) # -> M
+                high = self.vocab.word2index([w.strip().lower() if w.strip().lower() in self.vocab.to_dict()['index2word'] else '<<pad>>' for w in high]) # -> M
 
-            highs[idx] = high
+                highs.append(high)
 
         # Put on device. 
-        high = torch.tensor(highs[idx], dtype=torch.long) # -> M
-        high = high.reshape(1, -1).to(self.device) # -> 1 x M
+        high = torch.tensor(highs, dtype=torch.long)
+        high = high.reshape(len(highs), -1).to(self.device) # -> B x M
 
-        high_len = high.bool().byte().sum().view(1,).to(self.device)
+        high_len = high.bool().byte().sum(dim=1).view(-1,).to(self.device)
 
         # Add new observation to buffer. 
-        prev_obs[idx].append(new_obs[idx]['image'].reshape(self.img_shape))
+        prev_obs.append(np.stack([new_obs[idx]['image'].reshape(self.img_shape) for idx in range(len(new_obs))]))
 
         # Full trajectory with new observation. 
-        traj = torch.tensor(prev_obs[idx], dtype=torch.float).view(1, len(prev_obs[idx]), -1).to(self.device)
-        traj_len = torch.tensor([len(prev_obs[idx])]).to(self.device)
+
+        traj = torch.tensor(np.stack(prev_obs, axis=1), dtype=torch.float).view(-1, len(prev_obs), self.img_shape).to(self.device) # B X M X 147
+        traj_len = torch.full((traj.shape[0],), len(prev_obs)).long().to(self.device)
 
         # Compute CPV reward with new observation incorporated. 
-        self.eval()
-        new_sim = self.compute_similarity(high, traj, high_len, traj_len).item()
+        with torch.no_grad(): 
+            self.eval()
+            new_sim = self.compute_similarity(high, traj, high_len, traj_len).cpu().numpy()
 
         # Potential-based reward is delta in similarity between previous and current trajectory. 
-        reward = new_sim - prev_rewards[idx]
+        reward = new_sim - prev_rewards
 
         # Store in cache for use next iteration. 
-        prev_rewards[idx] = reward
+        prev_rewards = new_sim
 
         return reward
