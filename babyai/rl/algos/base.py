@@ -156,6 +156,8 @@ class BaseAlgo(ABC):
         if self.reward_fn == 'cpv' or self.reward_fn == 'both':
             self.reset_cpv_buffer()
 
+        start = time.time()
+
         for i in range(self.num_frames_per_proc):
             # Do one agent-environment interaction
 
@@ -174,7 +176,8 @@ class BaseAlgo(ABC):
 
             if self.reward_fn == 'cpv' or self.reward_fn == 'both': 
 
-                # TODO can we avoid the loop and tensorize the whole operation? 
+                reward = old_reward # TODO Do we even need this if-else block here anymore?
+                """
                 unnormalized_reward = self.reward_model.calculate_reward(self.cpv_buffer, self.obs)
 
                 if self.aux_info:
@@ -187,6 +190,7 @@ class BaseAlgo(ABC):
                 self.all_rewards.extend(unnormalized_reward)
                 if len(self.all_rewards) > 1000:
                     self.all_rewards[-1000:]
+                """
 
             elif self.reward_fn == 'babyai': 
                 reward = old_reward
@@ -235,8 +239,19 @@ class BaseAlgo(ABC):
             self.log_episode_reshaped_return *= self.mask
             self.log_episode_num_frames *= self.mask
 
-        # Add advantage and return to experiences
+        # If CPV, recompute reward based on trajectory. 
+        if self.reward_fn == 'cpv': 
 
+            # Make single run through CPV model to compute all rewards at once. 
+            self.rewards = self.reward_model.calculate_reward(self.obss).permute(1,0)
+
+            # TODO normalize rewards? 
+            std, mean = torch.std_mean(self.rewards, dim=1)
+            std = std.view(-1, 1).expand_as(self.rewards)
+            mean = mean.view(-1, 1).expand_as(self.rewards)
+            self.reward = torch.clamp((self.rewards - mean) /  std, 0.0, 1.0)
+
+        # Add advantage and return to experiences
         preprocessed_obs = self.preprocess_obss(self.obs, device=self.device)
         with torch.no_grad():
             next_value = self.acmodel(preprocessed_obs, self.memory * self.mask.unsqueeze(1))['value']

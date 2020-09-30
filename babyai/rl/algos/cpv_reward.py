@@ -57,7 +57,7 @@ class CPV(nn.Module):
 
         ### Context ###
         context = pack_padded_sequence(context, context_lens, batch_first=True, enforce_sorted=False)
-        context, h, c = self.encoder(context, B)
+        context, h, c = self.encoder(context)
 
         ### Target ###
         packed_target = pack_padded_sequence(target, target_lens, batch_first=True, enforce_sorted=False)
@@ -96,12 +96,13 @@ class CPV(nn.Module):
         high, _, _ = self.encoder(high, B) # -> B x H
 
         ### Context ###
-        context = pack_padded_sequence(context, context_lens, batch_first=True, enforce_sorted=False)
-        context, h, c = self.encoder(context, B)
+        context, _ = self.enc(context)
+        dir1, dir2 = torch.split(context, context.shape[-1] // 2, dim=-1)
+        context = dir2 + dir1
 
         ### Combinations ###
-        dot_prod = torch.diagonal(torch.matmul(high, torch.transpose(context, 0, 1))) # -> B
-        norms = torch.norm(high, dim=1)
+        dot_prod = torch.bmm(context, high.view(B, high.shape[1], 1)).squeeze() # -> B x M
+        norms = torch.norm(high, dim=1).view((64, 1)).expand(-1, dot_prod.shape[1])
 
         # Similarity between high and current trajectory normalized by the high's norm. 
         sim = dot_prod / norms
@@ -117,45 +118,34 @@ class CPV(nn.Module):
         cs = cs.lower()
         return cs
 
-    def calculate_reward(self, cpv_buffer, new_obs):
+    def calculate_reward(self, all_obs):
 
-        # Unpack values from buffer. 
-        highs = cpv_buffer['mission']
-        prev_obs = cpv_buffer['obs']
-        prev_rewards = cpv_buffer['prev_reward']
+        # Unpack values from input. 
+        high = [o['mission'] for o in all_obs[0]]
 
-        # If first time step, then tokenize mission using observation. 
-        if len(highs) == 0: 
+        obs = []
+        for i in range(len(all_obs[0])):
+            obs.append([o[i]['image'] for o in all_obs])
 
-            for idx in range(len(new_obs)): 
-                high = revtok.tokenize(self.remove_spaces_and_lower(new_obs[idx]['mission'])) # -> M
-                high = self.vocab.word2index([w.strip().lower() if w.strip().lower() in self.vocab.to_dict()['index2word'] else '<<pad>>' for w in high]) # -> M
-
-                highs.append(high)
+        # Tokenize highs. 
+        high = [revtok.tokenize(self.remove_spaces_and_lower(h)) for h in high] # -> M
+        high = [self.vocab.word2index([w.strip().lower() if w.strip().lower() in self.vocab.to_dict()['index2word'] else '<<pad>>' for w in h]) for h in high] # -> M
 
         # Put on device. 
-        high = torch.tensor(highs, dtype=torch.long)
-        high = high.reshape(len(highs), -1).to(self.device) # -> B x M
-
+        high = torch.tensor(high, dtype=torch.long)
+        high = high.reshape(len(high), -1).to(self.device) # -> B x M
         high_len = high.bool().byte().sum(dim=1).view(-1,).to(self.device)
 
-        # Add new observation to buffer. 
-        prev_obs.append(np.stack([new_obs[idx]['image'].reshape(self.img_shape) for idx in range(len(new_obs))]))
-
-        # Full trajectory with new observation. 
-
-        traj = torch.tensor(np.stack(prev_obs, axis=1), dtype=torch.float).view(-1, len(prev_obs), self.img_shape).to(self.device) # B X M X 147
-        traj_len = torch.full((traj.shape[0],), len(prev_obs)).long().to(self.device)
+        traj = torch.tensor(obs, dtype=torch.float).view(len(obs), len(obs[0]), self.img_shape).to(self.device) # B X M X 147
+        traj_len = torch.full((traj.shape[0],), traj.shape[1]).long().to(self.device)
 
         # Compute CPV reward with new observation incorporated. 
         with torch.no_grad(): 
             self.eval()
-            new_sim = self.compute_similarity(high, traj, high_len, traj_len).cpu().numpy()
+            sims = self.compute_similarity(high, traj, high_len, traj_len)
 
         # Potential-based reward is delta in similarity between previous and current trajectory. 
-        reward = new_sim - prev_rewards
+        reward = sims[:,1:] - sims[:,:-1]
+        reward = torch.cat([torch.zeros((reward.shape[0],1), dtype=torch.float).to(self.device), reward], dim=1)
 
-        # Store in cache for use next iteration. 
-        prev_rewards = new_sim
-
-        return reward
+        return reward.detach()
